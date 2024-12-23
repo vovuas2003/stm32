@@ -1,0 +1,290 @@
+MCU stm32f103c8t6 "blue pill"
+
+HC-SR04 (ultrasonic sensor) to MCU:
+	VCC - 5V
+	Gnd - GND
+	Trig - A9 (5V tolerant Pin)
+	Echo - A8 (5V tolerant Pin)
+
+tm1637 (4-digit 7-segmented Display) to MCU:
+	VCC - 5V
+	Gnd - GND
+	CLK - B9 (??? maybe need only 5V tolerant - check datacheet)
+	DIO - B8 (??? maybe need only 5V tolerant - check datacheet)
+library from https://github.com/rogerdahl/stm32-tm1637
+but need some improvement, just an example (or even better to use timer for real microseconds - see my source code):
+#define my_coeff 10
+void _tm1637DelayUsec(unsigned int i)
+{
+    for (; i>0; i--) {
+        for (int j = 0; j < (10 * my_coeff); ++j) {
+            __asm__ __volatile__("nop\n\t":::"memory");
+        }
+    }
+}
+
+LED (Vcc - Vled) / R < Imax:
+	long thin pin +anode - A1 (Vcc = 3.3 V; Imax around 20 mA, Imin around 1 mA, Vled around 1 V)
+	short massive pin -cathode - around 1 kOhm resistor - GND
+
+Button module that I have (------ is a button, all three wires are connected at the right side):
+	V ___------___,
+	G ___10kOhm___l
+	O ____________l
+So, obviously, this button module to MCU:
+	V - 3.3 (Vcc)
+	G - GND (pull-up resistor)
+	O - B1 (Output button pin, input for MCU)
+
+0. don't forget readme.txt in _main\readme.txt
+1.1. Pinout & Configuration -> System Core -> RCC -> High Speed Clock (HSE) -> Crystal/Ceramic Resonator
+1.2. Clock Configuration -> HCLK (MHz) -> 72 (enter, ok)
+1.3. Pinout & Configuration -> Timers -> TIM1 -> Clock Source -> Internal Clock (72 MHz timer for random values by HC-SR04)
+1.4. Pinout & Configuration -> Timers -> TIM2 -> 1) Clock Source -> Internal Clock 2) Prescaler -> 71 (accurate microseconds delays for tm1637 and for distance measuring with HC-SR04)
+2. Pinout & Configuration -> Pinout View (graphical scheme) -> 1) PA8, PB1 -> GPIO_Input (HC-SR04 Echo and button) 2) PA9, PB8, PB9, PA1 -> GPIO_Output (HC-SR04 Trig, tm1637 and LED)
+3. Core\Src\main.c
+3.1. Start timers, manual setting and getting timer values.
+3.2. Copy tm1637 lib and make it better (accurate delays and some changes).
+3.3. Max measured distance due to HC-SR04 datasheet is 400 cm, but our TIM1 counter is 72 MHz with 65535 overflow period, sound of speed is around 340 m/s and we need to detect reflected wave, so our real max distance possibility is (34000 * 65535) / (72000000 * 2) around 15 cm (min is 2 cm from datasheet); except random values we also want to detect intrusion, so both timers will be used (TIM1 for random, TIM2 for distance)
+3.4. Check all code in main.c, but logic is simple: measuring initial distance after 3s from start, then measuring distance every 1s (so long time is only for visualisation; it is just prototype, usb output of even or odd random value as a random bit in plans), displaying last 4 digits of TIM1 counter, if distance from TIM2 changes enough - it is intrusion and LED starts blinking every 0.5s until the button will be pressed (pressing button leads to new cycle of initial distance after 3s and so on)
+4. tm1637 can display garbage without any updates (doesn't work) after powering MCU on - just press reset button on MCU
+5. Additional code after CubeMX if you don't want download main.c:
+
+/* USER CODE BEGIN PD */
+#define TRIG_PORT GPIOA
+#define TRIG_PIN GPIO_PIN_9
+#define ECHO_PORT GPIOA
+#define ECHO_PIN GPIO_PIN_8
+
+#define CLK_PORT GPIOB
+#define CLK_PIN GPIO_PIN_9
+#define DIO_PORT GPIOB
+#define DIO_PIN GPIO_PIN_8
+
+#define LED_PORT GPIOA
+#define LED_PIN GPIO_PIN_1
+
+#define BTN_PORT GPIOB
+#define BTN_PIN GPIO_PIN_1
+/* USER CODE END PD */
+
+/* USER CODE BEGIN PFP */
+void hc_sr04get2timers(uint16_t*, uint16_t*);
+
+void tm1637DisplayDecimal(int);
+void tm1637SetBrightness(char);
+void _tm1637Start();
+void _tm1637Stop();
+void _tm1637ReadResult();
+void _tm1637WriteByte(unsigned char);
+void _tm1637DelayUsec(unsigned int);
+void _tm1637ClkHigh();
+void _tm1637ClkLow();
+void _tm1637DioHigh();
+void _tm1637DioLow();
+/* USER CODE END PFP */
+
+/* USER CODE BEGIN 2 */
+  HAL_TIM_Base_Start(&htim1);
+  HAL_TIM_Base_Start(&htim2);
+  tm1637SetBrightness(8);
+  uint16_t random, distance, initial_distance, delta; //not in cm, just timer counter
+  uint16_t max_delta = 1000 * 5 * 2 / 340; //intrusion if delta from initial distance is more than 5mm
+/* USER CODE END 2 */
+
+/* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+    HAL_GPIO_WritePin(TRIG_PORT, TRIG_PIN, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
+    tm1637DisplayDecimal(3);
+    HAL_Delay(999);
+    tm1637DisplayDecimal(2);
+    HAL_Delay(999);
+    tm1637DisplayDecimal(1);
+    HAL_Delay(999);
+    hc_sr04get2timers(&random, &initial_distance);
+    tm1637DisplayDecimal(random % 10000);
+    while(1) {
+        HAL_Delay(999);
+        hc_sr04get2timers(&random, &distance);
+        if(initial_distance > distance) {
+            delta = initial_distance - distance;
+        } else {
+            delta = distance - initial_distance;
+        }
+        if(delta > max_delta) {
+            tm1637DisplayDecimal(-1);
+            break;
+        }
+        tm1637DisplayDecimal(random % 10000);
+    }
+    while(1) {
+        HAL_GPIO_TogglePin(LED_PORT, LED_PIN);
+        HAL_Delay(499);
+        if(HAL_GPIO_ReadPin(BTN_PORT, BTN_PIN)) {
+            break;
+        }
+    }
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+
+/* USER CODE BEGIN 4 */
+void hc_sr04get2timers(uint16_t* timer_1, uint16_t* timer_2) {
+    uint16_t timer_1_1, timer_1_2, timer_2_1, timer_2_2;
+    uint32_t pMillis;
+    HAL_GPIO_WritePin(TRIG_PORT, TRIG_PIN, GPIO_PIN_SET);
+    __HAL_TIM_SET_COUNTER(&htim1, 0);
+    __HAL_TIM_SET_COUNTER(&htim2, 0);
+    while (__HAL_TIM_GET_COUNTER(&htim2) < 10);
+    HAL_GPIO_WritePin(TRIG_PORT, TRIG_PIN, GPIO_PIN_RESET);
+    pMillis = HAL_GetTick();
+    while (!(HAL_GPIO_ReadPin (ECHO_PORT, ECHO_PIN)) && pMillis + 10 > HAL_GetTick());
+    timer_1_1 = __HAL_TIM_GET_COUNTER (&htim1);
+    timer_2_1 = __HAL_TIM_GET_COUNTER (&htim2);
+    pMillis = HAL_GetTick();
+    while ((HAL_GPIO_ReadPin (ECHO_PORT, ECHO_PIN)) && pMillis + 50 > HAL_GetTick());
+    timer_1_2 = __HAL_TIM_GET_COUNTER (&htim1);
+    timer_2_2 = __HAL_TIM_GET_COUNTER (&htim2);
+    if(timer_1_2 > timer_1_1) {
+        *timer_1 = timer_1_2 - timer_1_1;
+    } else {
+        *timer_1 = timer_1_1 - timer_1_2;
+    }
+    if(timer_2_2 > timer_2_1) {
+        *timer_2 = timer_2_2 - timer_2_1;
+    } else {
+        *timer_2 = timer_2_1 - timer_2_2;
+    }
+}
+
+//lib for tm1637 display
+
+const char segmentMap[] = {
+    0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f, // 0-9
+    0x00, 0x40 // clear, -
+};
+
+void tm1637DisplayDecimal(int n)
+{
+    //if(n > 9999 || n < -999) return;
+    int otr = 0;
+    if (n < 0) {
+        n *= -1;
+        otr = 1;
+    }
+
+    unsigned char digitArr[4];
+    digitArr[0] = segmentMap[n % 10];
+    n /= 10;
+    for (int i = 1; i < 4; ++i) {
+        if (n % 10) {
+        digitArr[i] = segmentMap[n % 10];
+        } else {
+            digitArr[i] = segmentMap[10];
+        }
+        n /= 10;
+    }
+    if (otr) {
+        digitArr[3] = segmentMap[11];
+    }
+
+    _tm1637Start();
+    _tm1637WriteByte(0x40);
+    _tm1637ReadResult();
+    _tm1637Stop();
+
+    _tm1637Start();
+    _tm1637WriteByte(0xc0);
+    _tm1637ReadResult();
+
+    for (int i = 0; i < 4; ++i) {
+        _tm1637WriteByte(digitArr[3 - i]);
+        _tm1637ReadResult();
+    }
+
+    _tm1637Stop();
+}
+
+void tm1637SetBrightness(char brightness)
+{
+    _tm1637Start();
+    _tm1637WriteByte(0x87 + brightness);
+    _tm1637ReadResult();
+    _tm1637Stop();
+}
+
+void _tm1637Start(void)
+{
+    _tm1637ClkHigh();
+    _tm1637DioHigh();
+    _tm1637DelayUsec(20);
+    _tm1637DioLow();
+}
+
+void _tm1637Stop(void)
+{
+    _tm1637ClkLow();
+    _tm1637DelayUsec(20);
+    _tm1637DioLow();
+    _tm1637DelayUsec(20);
+    _tm1637ClkHigh();
+    _tm1637DelayUsec(20);
+    _tm1637DioHigh();
+}
+
+void _tm1637ReadResult(void)
+{
+    _tm1637ClkLow();
+    _tm1637DelayUsec(50);
+    _tm1637ClkHigh();
+    _tm1637DelayUsec(20);
+    _tm1637ClkLow();
+}
+
+void _tm1637WriteByte(unsigned char b)
+{
+    for (int i = 0; i < 8; ++i) {
+        _tm1637ClkLow();
+        if (b & 0x01) {
+            _tm1637DioHigh();
+        } else {
+            _tm1637DioLow();
+        }
+        _tm1637DelayUsec(30);
+        b >>= 1;
+        _tm1637ClkHigh();
+        _tm1637DelayUsec(30);
+    }
+}
+
+void _tm1637DelayUsec(unsigned int i)
+{
+    __HAL_TIM_SET_COUNTER(&htim2, 0);
+    while(__HAL_TIM_GET_COUNTER(&htim2) < i);
+}
+
+void _tm1637ClkHigh(void)
+{
+    HAL_GPIO_WritePin(CLK_PORT, CLK_PIN, GPIO_PIN_SET);
+}
+
+void _tm1637ClkLow(void)
+{
+    HAL_GPIO_WritePin(CLK_PORT, CLK_PIN, GPIO_PIN_RESET);
+}
+
+void _tm1637DioHigh(void)
+{
+    HAL_GPIO_WritePin(DIO_PORT, DIO_PIN, GPIO_PIN_SET);
+}
+
+void _tm1637DioLow(void)
+{
+    HAL_GPIO_WritePin(DIO_PORT, DIO_PIN, GPIO_PIN_RESET);
+}
+/* USER CODE END 4 */
